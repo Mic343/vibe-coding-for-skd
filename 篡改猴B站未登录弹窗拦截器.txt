@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         B站未登录弹窗拦截器
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  自动拦截并移除B站未登录时的打扰弹窗，恢复正常浏览体验
-// @author       YourName
+// @version      1.2
+// @description  拦截未登录弹窗并保持视频连续播放，不影响手动暂停
+// @author       Mic343
 // @match        *://*.bilibili.com/*
 // @run-at       document-start
 // @grant        none
@@ -11,35 +11,143 @@
 
 (function() {
     'use strict';
-    // ==UserScript==
-// @name         B站未登录弹窗自动拦截器
-// @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  完美拦截B站未登录弹窗，不影响网页正常滚动
-// @author       YourName
-// @match        *://*.bilibili.com/*
-// @run-at       document-start
-// @grant        none
-// ==/UserScript==
 
-(function() {
-    'use strict';
+    const LOGIN_SELECTOR = '.bili-mini-mask, .bili-mini-content-wp, [class*="bili-mini-login"], .bili-guide-layer, .login-tip, .login-panel-popover';
+
+    const hasLoginPopup = () => !!document.querySelector(LOGIN_SELECTOR);
+
+    // 区分「用户主动暂停」与「登录弹窗触发的脚本暂停」
+    let userInteractedRecently = false;
+    const markUserInteraction = () => {
+        userInteractedRecently = true;
+        setTimeout(() => { userInteractedRecently = false; }, 800);
+    };
+    document.addEventListener('click', markUserInteraction, true);
+    document.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' || e.key === ' ' || e.key === 'k' || e.key === 'K') {
+            markUserInteraction();
+        }
+    }, true);
+
+    let loginGraceUntil = 0;
+    const markLoginPopupMoment = () => {
+        loginGraceUntil = Date.now() + 6000;
+    };
+    const inLoginGrace = () => Date.now() < loginGraceUntil || hasLoginPopup();
+
+    const shouldBlockPause = () => !userInteractedRecently && (inLoginGrace() || hasLoginPopup());
 
     // ==========================================
-    // 1. CSS 强力压制：让弹窗和遮罩直接隐形、不可点击、不占空间
+    // 1. 阻止 miniLogin 脚本注入（减少弹窗与暂停触发）
+    // ==========================================
+    const blockMiniLoginScript = (node) => {
+        return node?.tagName === 'SCRIPT' && typeof node.src === 'string' && node.src.includes('miniLogin');
+    };
+    const origAppendChild = Node.prototype.appendChild;
+    Node.prototype.appendChild = function(child) {
+        if (blockMiniLoginScript(child)) return child;
+        return origAppendChild.call(this, child);
+    };
+    const origInsertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function(child, ref) {
+        if (blockMiniLoginScript(child)) return child;
+        return origInsertBefore.call(this, child, ref);
+    };
+
+    // ==========================================
+    // 2. 拦截 video 元素上的 pause（登录流程常会直接调）
+    // ==========================================
+    const nativeMediaPause = HTMLMediaElement.prototype.pause;
+    HTMLMediaElement.prototype.pause = function() {
+        if (shouldBlockPause()) return;
+        return nativeMediaPause.call(this);
+    };
+
+    // ==========================================
+    // 3. 拦截 B 站播放器 window.player.pause
+    // ==========================================
+    const hookBilibiliPlayer = () => {
+        const player = window.player;
+        if (!player || player.__tmPauseHooked) return false;
+
+        if (typeof player.pause === 'function') {
+            const originPause = player.pause.bind(player);
+            player.pause = function(...args) {
+                if (shouldBlockPause()) return;
+                return originPause(...args);
+            };
+        }
+
+        if (typeof player.getMediaInfo === 'function') {
+            const originGetMediaInfo = player.getMediaInfo.bind(player);
+            player.getMediaInfo = function(...args) {
+                const info = originGetMediaInfo(...args);
+                if (info && typeof info.absolutePlayTime === 'number') {
+                    return { ...info, absolutePlayTime: 0 };
+                }
+                return info;
+            };
+        }
+
+        player.__tmPauseHooked = true;
+        return true;
+    };
+
+    const playerHookTimer = setInterval(() => {
+        if (hookBilibiliPlayer()) clearInterval(playerHookTimer);
+    }, 300);
+    setTimeout(() => clearInterval(playerHookTimer), 120000);
+
+    // ==========================================
+    // 4. 若仍被暂停，在 grace 窗口内自动续播
+    // ==========================================
+    const resumeVideos = () => {
+        if (userInteractedRecently) return;
+        document.querySelectorAll('video').forEach((video) => {
+            if (video.paused && !video.ended) {
+                video.play().catch(() => {});
+            }
+        });
+    };
+
+    let keepAliveTimer = null;
+    const startKeepAlive = () => {
+        markLoginPopupMoment();
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        const deadline = Date.now() + 6000;
+        keepAliveTimer = setInterval(() => {
+            if (Date.now() > deadline) {
+                clearInterval(keepAliveTimer);
+                keepAliveTimer = null;
+                return;
+            }
+            resumeVideos();
+        }, 200);
+        resumeVideos();
+    };
+
+    document.addEventListener('pause', (e) => {
+        if (e.target?.tagName !== 'VIDEO' || userInteractedRecently) return;
+        if (!inLoginGrace()) return;
+        queueMicrotask(() => {
+            if (!userInteractedRecently && inLoginGrace()) resumeVideos();
+        });
+    }, true);
+
+    // ==========================================
+    // 5. CSS 压制弹窗 + 恢复页面滚动
     // ==========================================
     const injectStyle = () => {
         if (document.getElementById('tm-bilibili-no-login-css')) return;
         const style = document.createElement('style');
         style.id = 'tm-bilibili-no-login-css';
-        style.innerHTML = `
-            /* 强力隐藏总遮罩层和小破站的迷你登录框系列组件 */
+        style.textContent = `
             .bili-mini-mask,
             .bili-mini-content-wp,
             [class*="bili-mini-login"],
-            /* 顺便预防部分视频播放中途弹出的全屏登录拦截 */
             .bili-guide-layer,
-            .login-tip {
+            .login-tip,
+            .login-panel-popover {
                 display: none !important;
                 opacity: 0 !important;
                 visibility: hidden !important;
@@ -47,8 +155,6 @@
                 width: 0 !important;
                 height: 0 !important;
             }
-
-            /* 强行恢复网页滚动条，防止B站弹出登录时锁死网页滚动 */
             html, body {
                 overflow: auto !important;
                 height: auto !important;
@@ -57,45 +163,40 @@
         (document.head || document.documentElement).appendChild(style);
     };
 
-    // 网页刚解析时立刻注入 CSS
     injectStyle();
 
     // ==========================================
-    // 2. DOM 动态扫描：一旦发现弹窗节点出生，直接从内存中彻底 remove 掉
+    // 6. DOM 扫描：移除弹窗并立刻续播
     // ==========================================
-    const killLoginDOM = () => {
-        const observer = new MutationObserver((mutationsList) => {
-            for (let mutation of mutationsList) {
-                if (mutation.type === 'childList') {
-                    // 只要发现 bili-mini-mask，立刻拔网线销毁
-                    const mask = document.querySelector('.bili-mini-mask');
-                    if (mask) {
-                        mask.remove();
-                        console.log('【篡改猴】已成功强行销毁 B站 登录遮罩层。');
-                    }
+    const removeLoginNodes = () => {
+        let removed = false;
+        document.querySelectorAll(LOGIN_SELECTOR).forEach((node) => {
+            node.remove();
+            removed = true;
+        });
+        if (removed) startKeepAlive();
+        return removed;
+    };
 
-                    // 销毁内容框（做个双保险）
-                    const content = document.querySelector('.bili-mini-content-wp');
-                    if (content) {
-                        content.remove();
-                    }
-                }
+    const killLoginDOM = () => {
+        removeLoginNodes();
+        const observer = new MutationObserver(() => {
+            if (removeLoginNodes()) {
+                console.log('【篡改猴】已移除 B 站登录弹窗并恢复播放');
             }
         });
-
         observer.observe(document.documentElement, { childList: true, subtree: true });
     };
 
-    // 绑定启动
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
             injectStyle();
             killLoginDOM();
+            hookBilibiliPlayer();
         });
     } else {
         injectStyle();
         killLoginDOM();
+        hookBilibiliPlayer();
     }
-
-})();
 })();
