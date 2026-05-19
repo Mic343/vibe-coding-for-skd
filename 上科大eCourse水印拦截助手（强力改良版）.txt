@@ -1,0 +1,90 @@
+// ==UserScript==
+// @name         上科大eCourse水印拦截助手（强力改良版）
+// @namespace    http://tampermonkey.net/
+// @version      2.0
+// @description  采用CSS强制注入与动态DOM双重拦截技术，根治课件与播放器水印
+// @author       YourName
+// @match        https://ecourse.shanghaitech.edu.cn/*
+// @match        https://elrc.shanghaitech.edu.cn/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ==========================================
+    // 强力手段一：CSS 绝对隐形（最稳定，对付 Vue 动态渲染的标签极其有效）
+    // ==========================================
+    // 无论 JS 怎么异步生成 DOM，只要符合水印的 ID 或者是前缀，直接在浏览器渲染层将其隐藏
+    const cssInject = () => {
+        if (document.getElementById('tm-watermark-css')) return;
+        const style = document.createElement('style');
+        style.id = 'tm-watermark-css';
+        style.innerHTML = `
+            /* 强制隐藏类名中包含 watermark 的播放器组件 */
+            [class*="watermark"],
+            /* 强力隐藏已知的总容器 ID */
+            #wm_div_id,
+            /* 强力隐藏前缀匹配的小水印切片 */
+            [id^="mask_div_id_"],
+            /* 兼容图片标签形式的水印 */
+            img[src*="watermark"] {
+                display: none !important;
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+                width: 0 !important;
+                height: 0 !important;
+            }
+        `;
+        // 确保样式表挂载在最顶层
+        (document.head || document.documentElement).appendChild(style);
+    };
+
+    // 网页刚开始解析时注入一次
+    cssInject();
+
+    // ==========================================
+    // 强力手段二：DOM 变化监听（应对高级防篡改或 iframe 隔离）
+    // ==========================================
+    // 使用原生的 MutationObserver，时刻盯着网页，一旦发现有水印节点出生，瞬间将其彻底干掉
+    const killWatermarkDOM = () => {
+        const targetNode = document.documentElement;
+        const config = { childList: true, subtree: true };
+
+        const callback = function(mutationsList) {
+            for (let mutation of mutationsList) {
+                if (mutation.type === 'childList') {
+                    // 1. 拦截大总管容器
+                    const wmMain = document.getElementById('wm_div_id');
+                    if (wmMain) {
+                        wmMain.remove();
+                        console.log('【篡改猴】已强行捕获并销毁主水印 DOM 节点。');
+                    }
+
+                    // 2. 拦截可能散落的小碎片
+                    const children = document.querySelectorAll('[id^="mask_div_id_"]');
+                    if (children.length > 0) {
+                        children.forEach(el => el.remove());
+                    }
+                }
+            }
+        };
+
+        const observer = new MutationObserver(callback);
+        observer.observe(targetNode, config);
+    };
+
+    // 网页文档加载时启动监听
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            cssInject(); // 再次确保样式在 head 组装完毕后存在
+            killWatermarkDOM();
+        });
+    } else {
+        cssInject();
+        killWatermarkDOM();
+    }
+
+})();
