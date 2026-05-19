@@ -1,0 +1,101 @@
+// ==UserScript==
+// @name         B站未登录弹窗拦截器
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  自动拦截并移除B站未登录时的打扰弹窗，恢复正常浏览体验
+// @author       YourName
+// @match        *://*.bilibili.com/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    // ==UserScript==
+// @name         B站未登录弹窗自动拦截器
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  完美拦截B站未登录弹窗，不影响网页正常滚动
+// @author       YourName
+// @match        *://*.bilibili.com/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ==========================================
+    // 1. CSS 强力压制：让弹窗和遮罩直接隐形、不可点击、不占空间
+    // ==========================================
+    const injectStyle = () => {
+        if (document.getElementById('tm-bilibili-no-login-css')) return;
+        const style = document.createElement('style');
+        style.id = 'tm-bilibili-no-login-css';
+        style.innerHTML = `
+            /* 强力隐藏总遮罩层和小破站的迷你登录框系列组件 */
+            .bili-mini-mask,
+            .bili-mini-content-wp,
+            [class*="bili-mini-login"],
+            /* 顺便预防部分视频播放中途弹出的全屏登录拦截 */
+            .bili-guide-layer,
+            .login-tip {
+                display: none !important;
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+                width: 0 !important;
+                height: 0 !important;
+            }
+
+            /* 强行恢复网页滚动条，防止B站弹出登录时锁死网页滚动 */
+            html, body {
+                overflow: auto !important;
+                height: auto !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    };
+
+    // 网页刚解析时立刻注入 CSS
+    injectStyle();
+
+    // ==========================================
+    // 2. DOM 动态扫描：一旦发现弹窗节点出生，直接从内存中彻底 remove 掉
+    // ==========================================
+    const killLoginDOM = () => {
+        const observer = new MutationObserver((mutationsList) => {
+            for (let mutation of mutationsList) {
+                if (mutation.type === 'childList') {
+                    // 只要发现 bili-mini-mask，立刻拔网线销毁
+                    const mask = document.querySelector('.bili-mini-mask');
+                    if (mask) {
+                        mask.remove();
+                        console.log('【篡改猴】已成功强行销毁 B站 登录遮罩层。');
+                    }
+
+                    // 销毁内容框（做个双保险）
+                    const content = document.querySelector('.bili-mini-content-wp');
+                    if (content) {
+                        content.remove();
+                    }
+                }
+            }
+        });
+
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+    };
+
+    // 绑定启动
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            injectStyle();
+            killLoginDOM();
+        });
+    } else {
+        injectStyle();
+        killLoginDOM();
+    }
+
+})();
+})();
